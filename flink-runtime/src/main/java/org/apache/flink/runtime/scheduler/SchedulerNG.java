@@ -29,7 +29,6 @@ import org.apache.flink.runtime.concurrent.ComponentMainThreadExecutor;
 import org.apache.flink.runtime.execution.ExecutionState;
 import org.apache.flink.runtime.executiongraph.ArchivedExecutionGraph;
 import org.apache.flink.runtime.executiongraph.ExecutionAttemptID;
-import org.apache.flink.runtime.executiongraph.JobStatusListener;
 import org.apache.flink.runtime.executiongraph.TaskExecutionStateTransition;
 import org.apache.flink.runtime.io.network.partition.ResultPartitionID;
 import org.apache.flink.runtime.jobgraph.IntermediateDataSetID;
@@ -47,7 +46,6 @@ import org.apache.flink.runtime.operators.coordination.OperatorCoordinator;
 import org.apache.flink.runtime.operators.coordination.OperatorEvent;
 import org.apache.flink.runtime.query.KvStateLocation;
 import org.apache.flink.runtime.query.UnknownKvStateLocation;
-import org.apache.flink.runtime.rest.handler.legacy.backpressure.OperatorBackPressureStats;
 import org.apache.flink.runtime.state.KeyGroupRange;
 import org.apache.flink.runtime.taskmanager.TaskExecutionState;
 import org.apache.flink.util.FlinkException;
@@ -56,7 +54,6 @@ import javax.annotation.Nullable;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
-import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 
 /**
@@ -66,14 +63,9 @@ import java.util.concurrent.CompletableFuture;
  * instantiated.
  *
  * <p>Implementations can expect that methods will not be invoked concurrently. In fact, all
- * invocations will originate from a thread in the {@link ComponentMainThreadExecutor}, which will
- * be passed via {@link #initialize(ComponentMainThreadExecutor)}.
+ * invocations will originate from a thread in the {@link ComponentMainThreadExecutor}.
  */
 public interface SchedulerNG {
-
-    void initialize(ComponentMainThreadExecutor mainThreadExecutor);
-
-    void registerJobStatusListener(JobStatusListener jobStatusListener);
 
     void startScheduling();
 
@@ -132,11 +124,6 @@ public interface SchedulerNG {
     // ------------------------------------------------------------------------
 
     void updateAccumulators(AccumulatorSnapshot accumulatorSnapshot);
-
-    // ------------------------------------------------------------------------
-
-    Optional<OperatorBackPressureStats> requestOperatorBackPressureStats(JobVertexID jobVertexId)
-            throws FlinkException;
 
     // ------------------------------------------------------------------------
 

@@ -31,12 +31,13 @@ import org.apache.flink.runtime.checkpoint.CheckpointRetentionPolicy;
 import org.apache.flink.runtime.checkpoint.CompletedCheckpoint;
 import org.apache.flink.runtime.checkpoint.PendingCheckpoint;
 import org.apache.flink.runtime.checkpoint.StandaloneCheckpointRecoveryFactory;
-import org.apache.flink.runtime.concurrent.ManuallyTriggeredScheduledExecutorService;
+import org.apache.flink.runtime.concurrent.ComponentMainThreadExecutor;
 import org.apache.flink.runtime.concurrent.ScheduledExecutor;
 import org.apache.flink.runtime.concurrent.ScheduledExecutorServiceAdapter;
 import org.apache.flink.runtime.execution.ExecutionState;
 import org.apache.flink.runtime.executiongraph.ExecutionAttemptID;
 import org.apache.flink.runtime.executiongraph.ExecutionJobVertex;
+import org.apache.flink.runtime.executiongraph.JobStatusListener;
 import org.apache.flink.runtime.executiongraph.failover.flip1.FailoverStrategy;
 import org.apache.flink.runtime.executiongraph.failover.flip1.NoRestartBackoffTimeStrategy;
 import org.apache.flink.runtime.executiongraph.failover.flip1.RestartBackoffTimeStrategy;
@@ -59,8 +60,6 @@ import org.apache.flink.runtime.messages.checkpoint.AcknowledgeCheckpoint;
 import org.apache.flink.runtime.metrics.groups.JobManagerJobMetricGroup;
 import org.apache.flink.runtime.metrics.groups.UnregisteredMetricGroups;
 import org.apache.flink.runtime.operators.coordination.OperatorEvent;
-import org.apache.flink.runtime.rest.handler.legacy.backpressure.BackPressureStatsTracker;
-import org.apache.flink.runtime.rest.handler.legacy.backpressure.VoidBackPressureStatsTracker;
 import org.apache.flink.runtime.scheduler.strategy.ExecutionVertexID;
 import org.apache.flink.runtime.scheduler.strategy.PipelinedRegionSchedulingStrategy;
 import org.apache.flink.runtime.scheduler.strategy.SchedulingStrategyFactory;
@@ -103,24 +102,27 @@ public class SchedulerTestingUtils {
 
     private SchedulerTestingUtils() {}
 
-    public static DefaultSchedulerBuilder newSchedulerBuilder(final JobGraph jobGraph) {
-        return new DefaultSchedulerBuilder(jobGraph);
+    public static DefaultSchedulerBuilder newSchedulerBuilder(
+            final JobGraph jobGraph, final ComponentMainThreadExecutor mainThreadExecutor) {
+        return new DefaultSchedulerBuilder(jobGraph, mainThreadExecutor);
     }
 
-    public static DefaultScheduler createScheduler(final JobGraph jobGraph) throws Exception {
-        return newSchedulerBuilder(jobGraph).build();
+    public static DefaultScheduler createScheduler(
+            final JobGraph jobGraph, final ComponentMainThreadExecutor mainThreadExecutor)
+            throws Exception {
+        return newSchedulerBuilder(jobGraph, mainThreadExecutor).build();
     }
 
     public static DefaultSchedulerBuilder createSchedulerBuilder(
-            JobGraph jobGraph, ManuallyTriggeredScheduledExecutorService asyncExecutor) {
+            JobGraph jobGraph, ComponentMainThreadExecutor mainThreadExecutor) {
 
         return createSchedulerBuilder(
-                jobGraph, asyncExecutor, new SimpleAckingTaskManagerGateway());
+                jobGraph, mainThreadExecutor, new SimpleAckingTaskManagerGateway());
     }
 
     public static DefaultSchedulerBuilder createSchedulerBuilder(
             JobGraph jobGraph,
-            ManuallyTriggeredScheduledExecutorService asyncExecutor,
+            ComponentMainThreadExecutor mainThreadExecutor,
             TaskExecutorOperatorEventGateway operatorEventGateway) {
 
         final TaskManagerGateway gateway =
@@ -128,17 +130,15 @@ public class SchedulerTestingUtils {
                         ? (TaskManagerGateway) operatorEventGateway
                         : new TaskExecutorOperatorEventGatewayAdapter(operatorEventGateway);
 
-        return createSchedulerBuilder(jobGraph, asyncExecutor, gateway);
+        return createSchedulerBuilder(jobGraph, mainThreadExecutor, gateway);
     }
 
     public static DefaultSchedulerBuilder createSchedulerBuilder(
             JobGraph jobGraph,
-            ManuallyTriggeredScheduledExecutorService asyncExecutor,
+            ComponentMainThreadExecutor mainThreadExecutor,
             TaskManagerGateway taskManagerGateway) {
 
-        return newSchedulerBuilder(jobGraph)
-                .setFutureExecutor(asyncExecutor)
-                .setDelayExecutor(asyncExecutor)
+        return newSchedulerBuilder(jobGraph, mainThreadExecutor)
                 .setSchedulingStrategyFactory(new PipelinedRegionSchedulingStrategy.Factory())
                 .setRestartBackoffTimeStrategy(new TestRestartBackoffTimeStrategy(true, 0))
                 .setExecutionSlotAllocatorFactory(
@@ -382,12 +382,12 @@ public class SchedulerTestingUtils {
     public static class DefaultSchedulerBuilder {
         private final JobGraph jobGraph;
 
+        private final ComponentMainThreadExecutor mainThreadExecutor;
+
         private SchedulingStrategyFactory schedulingStrategyFactory =
                 new PipelinedRegionSchedulingStrategy.Factory();
 
         private Logger log = LOG;
-        private BackPressureStatsTracker backPressureStatsTracker =
-                VoidBackPressureStatsTracker.INSTANCE;
         private Executor ioExecutor = TestingUtils.defaultExecutor();
         private Configuration jobMasterConfiguration = new Configuration();
         private ScheduledExecutorService futureExecutor = TestingUtils.defaultExecutor();
@@ -411,19 +411,17 @@ public class SchedulerTestingUtils {
         private ExecutionVertexVersioner executionVertexVersioner = new ExecutionVertexVersioner();
         private ExecutionSlotAllocatorFactory executionSlotAllocatorFactory =
                 new TestExecutionSlotAllocatorFactory();
+        private JobStatusListener jobStatusListener =
+                (ignoredA, ignoredB, ignoredC, ignoredD) -> {};
 
-        public DefaultSchedulerBuilder(final JobGraph jobGraph) {
+        public DefaultSchedulerBuilder(
+                final JobGraph jobGraph, ComponentMainThreadExecutor mainThreadExecutor) {
             this.jobGraph = jobGraph;
+            this.mainThreadExecutor = mainThreadExecutor;
         }
 
         public DefaultSchedulerBuilder setLogger(final Logger log) {
             this.log = log;
-            return this;
-        }
-
-        public DefaultSchedulerBuilder setBackPressureStatsTracker(
-                final BackPressureStatsTracker backPressureStatsTracker) {
-            this.backPressureStatsTracker = backPressureStatsTracker;
             return this;
         }
 
@@ -523,11 +521,15 @@ public class SchedulerTestingUtils {
             return this;
         }
 
+        public DefaultSchedulerBuilder setJobStatusListener(JobStatusListener jobStatusListener) {
+            this.jobStatusListener = jobStatusListener;
+            return this;
+        }
+
         public DefaultScheduler build() throws Exception {
             return new DefaultScheduler(
                     log,
                     jobGraph,
-                    backPressureStatsTracker,
                     ioExecutor,
                     jobMasterConfiguration,
                     componentMainThreadExecutor -> {},
@@ -547,7 +549,9 @@ public class SchedulerTestingUtils {
                     executionVertexVersioner,
                     executionSlotAllocatorFactory,
                     new DefaultExecutionDeploymentTracker(),
-                    System.currentTimeMillis());
+                    System.currentTimeMillis(),
+                    mainThreadExecutor,
+                    jobStatusListener);
         }
     }
 }

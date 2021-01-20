@@ -20,7 +20,6 @@ package org.apache.flink.runtime.executiongraph;
 
 import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.api.common.Archiveable;
-import org.apache.flink.api.common.InputDependencyConstraint;
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.time.Time;
 import org.apache.flink.core.io.InputSplit;
@@ -34,8 +33,6 @@ import org.apache.flink.runtime.jobgraph.DistributionPattern;
 import org.apache.flink.runtime.jobgraph.IntermediateResultPartitionID;
 import org.apache.flink.runtime.jobgraph.JobEdge;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
-import org.apache.flink.runtime.jobmanager.scheduler.CoLocationConstraint;
-import org.apache.flink.runtime.jobmanager.scheduler.CoLocationGroup;
 import org.apache.flink.runtime.jobmaster.LogicalSlot;
 import org.apache.flink.runtime.scheduler.strategy.ExecutionVertexID;
 import org.apache.flink.runtime.taskmanager.TaskManagerLocation;
@@ -91,8 +88,6 @@ public class ExecutionVertex
 
     /** The name in the format "myTask (2/7)", cached to avoid frequent string concatenations. */
     private final String taskNameWithSubtask;
-
-    private CoLocationConstraint locationConstraint;
 
     /** The current or latest execution attempt of this vertex's task. */
     private Execution currentExecution; // this field must never be null
@@ -153,14 +148,6 @@ public class ExecutionVertex
                         initialGlobalModVersion,
                         createTimestamp,
                         timeout);
-
-        // create a co-location scheduling hint, if necessary
-        CoLocationGroup clg = jobVertex.getCoLocationGroup();
-        if (clg != null) {
-            this.locationConstraint = clg.getLocationConstraint(subTaskIndex);
-        } else {
-            this.locationConstraint = null;
-        }
 
         getExecutionGraph().registerExecution(currentExecution);
 
@@ -236,10 +223,6 @@ public class ExecutionVertex
 
     public ExecutionEdge[][] getAllInputEdges() {
         return inputEdges;
-    }
-
-    public CoLocationConstraint getLocationConstraint() {
-        return locationConstraint;
     }
 
     public InputSplit getNextInputSplit(String host) {
@@ -344,10 +327,6 @@ public class ExecutionVertex
 
     public Map<IntermediateResultPartitionID, IntermediateResultPartition> getProducedPartitions() {
         return resultPartitions;
-    }
-
-    public InputDependencyConstraint getInputDependencyConstraint() {
-        return getJobVertex().getInputDependencyConstraint();
     }
 
     // --------------------------------------------------------------------------------------------
@@ -652,11 +631,6 @@ public class ExecutionVertex
                 }
             }
 
-            CoLocationGroup grp = jobVertex.getCoLocationGroup();
-            if (grp != null) {
-                locationConstraint = grp.getLocationConstraint(subTaskIndex);
-            }
-
             // register this execution at the execution graph, to receive call backs
             getExecutionGraph().registerExecution(newExecution);
 
@@ -775,64 +749,6 @@ public class ExecutionVertex
         } else {
             return finishedBlockingPartitions;
         }
-    }
-
-    /**
-     * Check whether the InputDependencyConstraint is satisfied for this vertex.
-     *
-     * @return whether the input constraint is satisfied
-     */
-    boolean checkInputDependencyConstraints() {
-        if (inputEdges.length == 0) {
-            return true;
-        }
-
-        final InputDependencyConstraint inputDependencyConstraint = getInputDependencyConstraint();
-        switch (inputDependencyConstraint) {
-            case ANY:
-                return isAnyInputConsumable();
-            case ALL:
-                return areAllInputsConsumable();
-            default:
-                throw new IllegalStateException(
-                        "Unknown InputDependencyConstraint " + inputDependencyConstraint);
-        }
-    }
-
-    private boolean isAnyInputConsumable() {
-        for (int inputNumber = 0; inputNumber < inputEdges.length; inputNumber++) {
-            if (isInputConsumable(inputNumber)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private boolean areAllInputsConsumable() {
-        for (int inputNumber = 0; inputNumber < inputEdges.length; inputNumber++) {
-            if (!isInputConsumable(inputNumber)) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    /**
-     * Get whether an input of the vertex is consumable. An input is consumable when when any
-     * partition in it is consumable.
-     *
-     * <p>Note that a BLOCKING result partition is only consumable when all partitions in the result
-     * are FINISHED.
-     *
-     * @return whether the input is consumable
-     */
-    boolean isInputConsumable(int inputNumber) {
-        for (ExecutionEdge executionEdge : inputEdges[inputNumber]) {
-            if (executionEdge.getSource().isConsumable()) {
-                return true;
-            }
-        }
-        return false;
     }
 
     // --------------------------------------------------------------------------------------------

@@ -25,6 +25,8 @@ import org.apache.flink.api.common.state.ListStateDescriptor;
 import org.apache.flink.api.common.state.MapState;
 import org.apache.flink.api.common.state.MapStateDescriptor;
 import org.apache.flink.api.common.state.StateDescriptor;
+import org.apache.flink.api.common.state.ValueState;
+import org.apache.flink.api.common.state.ValueStateDescriptor;
 import org.apache.flink.api.common.typeinfo.PrimitiveArrayTypeInfo;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.java.tuple.Tuple2;
@@ -79,6 +81,7 @@ import org.apache.beam.sdk.options.PortablePipelineOptions;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.transforms.windowing.GlobalWindow;
 import org.apache.beam.sdk.util.WindowedValue;
+import org.apache.beam.vendor.grpc.v1p26p0.com.google.common.base.Charsets;
 import org.apache.beam.vendor.grpc.v1p26p0.com.google.protobuf.ByteString;
 import org.apache.beam.vendor.grpc.v1p26p0.com.google.protobuf.Struct;
 import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterables;
@@ -591,6 +594,8 @@ public abstract class BeamPythonFunctionRunner implements PythonFunctionRunner {
     private static class SimpleStateRequestHandler implements StateRequestHandler {
 
         private static final String CLEAR_CACHED_ITERATOR_MARK = "clear_iterators";
+        private static final String VALUE_STATE_MARK = "VS"; // short for VALUE_STATE
+        private static final String LIST_STATE_MARK = "LS"; // short for LIST_STATE
 
         // map state GET request flags
         private static final byte GET_FLAG = 0;
@@ -648,6 +653,9 @@ public abstract class BeamPythonFunctionRunner implements PythonFunctionRunner {
 
         private final ByteArrayWrapper reuseByteArrayWrapper = new ByteArrayWrapper(new byte[0]);
 
+        /** Let StateRequestHandler for user state only use a single cache token. */
+        private final BeamFnApi.ProcessBundleRequest.CacheToken cacheToken;
+
         SimpleStateRequestHandler(
                 KeyedStateBackend keyedStateBackend,
                 TypeSerializer keySerializer,
@@ -676,6 +684,12 @@ public abstract class BeamPythonFunctionRunner implements PythonFunctionRunner {
                                 "The value of '%s' must be greater than 0!",
                                 PythonOptions.MAP_STATE_ITERATE_RESPONSE_BATCH_SIZE.key()));
             }
+            cacheToken = createCacheToken();
+        }
+
+        @Override
+        public Iterable<BeamFnApi.ProcessBundleRequest.CacheToken> getCacheTokens() {
+            return Collections.singleton(cacheToken);
         }
 
         @Override
@@ -730,10 +744,11 @@ public abstract class BeamPythonFunctionRunner implements PythonFunctionRunner {
 
         private List<ByteString> convertToByteString(ListState<byte[]> listState) throws Exception {
             List<ByteString> ret = new LinkedList<>();
-            if (listState.get() == null) {
+            Iterable<byte[]> stateValue = listState.get();
+            if (stateValue == null) {
                 return ret;
             }
-            for (byte[] v : listState.get()) {
+            for (byte[] v : stateValue) {
                 ret.add(ByteString.copyFrom(v));
             }
             return ret;
@@ -742,24 +757,41 @@ public abstract class BeamPythonFunctionRunner implements PythonFunctionRunner {
         private CompletionStage<BeamFnApi.StateResponse.Builder> handleBagGetRequest(
                 BeamFnApi.StateRequest request) throws Exception {
 
-            ListState<byte[]> partitionedState = getListState(request);
-            List<ByteString> byteStrings = convertToByteString(partitionedState);
+            String stateType = request.getStateKey().getBagUserState().getTransformId();
+            ByteString data;
+            if (stateType.equals(VALUE_STATE_MARK)) {
+                ValueState<byte[]> valueState = getValueState(request);
+                byte[] value = valueState.value();
+                data = ByteString.copyFrom(value != null ? value : new byte[0]);
+            } else if (stateType.equals(LIST_STATE_MARK)) {
+                ListState<byte[]> listState = getListState(request);
+                List<ByteString> byteStrings = convertToByteString(listState);
+                data = ByteString.copyFrom(byteStrings);
+            } else {
+                throw new RuntimeException(String.format("Unsupported state type %s.", stateType));
+            }
 
             return CompletableFuture.completedFuture(
                     BeamFnApi.StateResponse.newBuilder()
                             .setId(request.getId())
-                            .setGet(
-                                    BeamFnApi.StateGetResponse.newBuilder()
-                                            .setData(ByteString.copyFrom(byteStrings))));
+                            .setGet(BeamFnApi.StateGetResponse.newBuilder().setData(data)));
         }
 
         private CompletionStage<BeamFnApi.StateResponse.Builder> handleBagAppendRequest(
                 BeamFnApi.StateRequest request) throws Exception {
 
-            ListState<byte[]> partitionedState = getListState(request);
+            String stateType = request.getStateKey().getBagUserState().getTransformId();
             // get values
             byte[] valueBytes = request.getAppend().getData().toByteArray();
-            partitionedState.add(valueBytes);
+            if (stateType.equals(VALUE_STATE_MARK)) {
+                ValueState<byte[]> valueState = getValueState(request);
+                valueState.update(valueBytes);
+            } else if (stateType.equals(LIST_STATE_MARK)) {
+                ListState<byte[]> listState = getListState(request);
+                listState.add(valueBytes);
+            } else {
+                throw new RuntimeException(String.format("Unsupported state type %s.", stateType));
+            }
 
             return CompletableFuture.completedFuture(
                     BeamFnApi.StateResponse.newBuilder()
@@ -770,13 +802,45 @@ public abstract class BeamPythonFunctionRunner implements PythonFunctionRunner {
         private CompletionStage<BeamFnApi.StateResponse.Builder> handleBagClearRequest(
                 BeamFnApi.StateRequest request) throws Exception {
 
-            ListState<byte[]> partitionedState = getListState(request);
+            String stateType = request.getStateKey().getBagUserState().getTransformId();
+            if (stateType.equals(VALUE_STATE_MARK)) {
+                ValueState<byte[]> valueState = getValueState(request);
+                valueState.clear();
+            } else if (stateType.equals(LIST_STATE_MARK)) {
+                ListState<byte[]> listState = getListState(request);
+                listState.clear();
+            } else {
+                throw new RuntimeException(String.format("Unsupported state type %s.", stateType));
+            }
 
-            partitionedState.clear();
             return CompletableFuture.completedFuture(
                     BeamFnApi.StateResponse.newBuilder()
                             .setId(request.getId())
                             .setClear(BeamFnApi.StateClearResponse.getDefaultInstance()));
+        }
+
+        private ValueState<byte[]> getValueState(BeamFnApi.StateRequest request) throws Exception {
+            BeamFnApi.StateKey.BagUserState bagUserState = request.getStateKey().getBagUserState();
+            String stateName = PYTHON_STATE_PREFIX + bagUserState.getUserStateId();
+            ValueStateDescriptor<byte[]> valueStateDescriptor;
+            StateDescriptor cachedStateDescriptor = stateDescriptorCache.get(stateName);
+            if (cachedStateDescriptor instanceof ValueStateDescriptor) {
+                valueStateDescriptor = (ValueStateDescriptor<byte[]>) cachedStateDescriptor;
+            } else if (cachedStateDescriptor == null) {
+                valueStateDescriptor = new ValueStateDescriptor<>(stateName, valueSerializer);
+                stateDescriptorCache.put(stateName, valueStateDescriptor);
+            } else {
+                throw new RuntimeException(
+                        String.format(
+                                "State name corrupt detected: "
+                                        + "'%s' is used both as VALUE state and '%s' state at the same time.",
+                                stateName, cachedStateDescriptor.getType()));
+            }
+            return (ValueState<byte[]>)
+                    keyedStateBackend.getPartitionedState(
+                            VoidNamespace.INSTANCE,
+                            VoidNamespaceSerializer.INSTANCE,
+                            valueStateDescriptor);
         }
 
         private ListState<byte[]> getListState(BeamFnApi.StateRequest request) throws Exception {
@@ -1090,6 +1154,17 @@ public abstract class BeamPythonFunctionRunner implements PythonFunctionRunner {
                             VoidNamespace.INSTANCE,
                             VoidNamespaceSerializer.INSTANCE,
                             mapStateDescriptor);
+        }
+
+        private BeamFnApi.ProcessBundleRequest.CacheToken createCacheToken() {
+            ByteString token =
+                    ByteString.copyFrom(UUID.randomUUID().toString().getBytes(Charsets.UTF_8));
+            return BeamFnApi.ProcessBundleRequest.CacheToken.newBuilder()
+                    .setUserState(
+                            BeamFnApi.ProcessBundleRequest.CacheToken.UserState
+                                    .getDefaultInstance())
+                    .setToken(token)
+                    .build();
         }
     }
 }

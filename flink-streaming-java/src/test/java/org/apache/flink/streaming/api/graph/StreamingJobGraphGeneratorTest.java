@@ -818,10 +818,11 @@ public class StreamingJobGraphGeneratorTest extends TestLogger {
             // others have no co-location group by default
             if (jobVertex.getName().startsWith(StreamGraph.ITERATION_SOURCE_NAME_PREFIX)) {
                 iterationSourceCoLocationGroup = jobVertex.getCoLocationGroup();
-                assertTrue(iterationSourceCoLocationGroup.getVertices().contains(jobVertex));
+                assertTrue(
+                        iterationSourceCoLocationGroup.getVertexIds().contains(jobVertex.getID()));
             } else if (jobVertex.getName().startsWith(StreamGraph.ITERATION_SINK_NAME_PREFIX)) {
                 iterationSinkCoLocationGroup = jobVertex.getCoLocationGroup();
-                assertTrue(iterationSinkCoLocationGroup.getVertices().contains(jobVertex));
+                assertTrue(iterationSinkCoLocationGroup.getVertexIds().contains(jobVertex.getID()));
             } else {
                 assertNull(jobVertex.getCoLocationGroup());
             }
@@ -982,12 +983,12 @@ public class StreamingJobGraphGeneratorTest extends TestLogger {
 
         // source: batch
         operatorScopeManagedMemoryUseCaseWeights.add(
-                Collections.singletonMap(ManagedMemoryUseCase.BATCH_OP, 1));
+                Collections.singletonMap(ManagedMemoryUseCase.OPERATOR, 1));
         slotScopeManagedMemoryUseCases.add(Collections.emptySet());
 
         // map1: batch, python
         operatorScopeManagedMemoryUseCaseWeights.add(
-                Collections.singletonMap(ManagedMemoryUseCase.BATCH_OP, 1));
+                Collections.singletonMap(ManagedMemoryUseCase.OPERATOR, 1));
         slotScopeManagedMemoryUseCases.add(Collections.singleton(ManagedMemoryUseCase.PYTHON));
 
         // map3: python
@@ -996,7 +997,7 @@ public class StreamingJobGraphGeneratorTest extends TestLogger {
 
         // map3: batch
         operatorScopeManagedMemoryUseCaseWeights.add(
-                Collections.singletonMap(ManagedMemoryUseCase.BATCH_OP, 1));
+                Collections.singletonMap(ManagedMemoryUseCase.OPERATOR, 1));
         slotScopeManagedMemoryUseCases.add(Collections.emptySet());
 
         // slotSharingGroup1 contains batch and python use cases: v1(source[batch]) -> map1[batch,
@@ -1121,7 +1122,7 @@ public class StreamingJobGraphGeneratorTest extends TestLogger {
         assertEquals(
                 expectedBatchFrac,
                 streamConfig.getManagedMemoryFractionOperatorUseCaseOfSlot(
-                        ManagedMemoryUseCase.BATCH_OP,
+                        ManagedMemoryUseCase.OPERATOR,
                         tmConfig,
                         ClassLoader.getSystemClassLoader()),
                 delta);

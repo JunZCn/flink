@@ -18,7 +18,7 @@
 
 package org.apache.flink.formats.csv;
 
-import org.apache.flink.api.java.typeutils.TypeExtractor;
+import org.apache.flink.api.common.typeutils.base.VoidSerializer;
 import org.apache.flink.table.data.GenericRowData;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.data.util.DataFormatConverters;
@@ -207,6 +207,12 @@ public class CsvRowDataSerDeSchemaTest {
     }
 
     @Test
+    public void testDeserializeNullRow() throws Exception {
+        // return null for null input
+        assertNull(testDeserialization(false, false, null));
+    }
+
+    @Test
     public void testDeserializeIncompleteRow() throws Exception {
         // last two columns are missing
         assertEquals(Row.of("Test", null, null), testDeserialization(true, false, "Test"));
@@ -263,8 +269,7 @@ public class CsvRowDataSerDeSchemaTest {
 
     @Test(expected = IllegalArgumentException.class)
     public void testInvalidType() throws Exception {
-        testNullableField(
-                RAW(TypeExtractor.getForClass(java.util.Date.class)), "FAIL", new java.util.Date());
+        testNullableField(RAW(Void.class, VoidSerializer.INSTANCE), "FAIL", new java.util.Date());
     }
 
     @Test
@@ -404,7 +409,7 @@ public class CsvRowDataSerDeSchemaTest {
                 InstantiationUtil.deserializeObject(
                         InstantiationUtil.serializeObject(deserSchemaBuilder.build()),
                         CsvRowDeSerializationSchemaTest.class.getClassLoader());
-        return schema.deserialize(csv.getBytes());
+        return schema.deserialize(csv != null ? csv.getBytes() : null);
     }
 
     private static RowData rowData(String str1, int integer, String str2) {
